@@ -1283,8 +1283,20 @@
                     placeholder="E-Mail für Report (optional, kostenlos)">
                 <button class="btn btn-outline" onclick="subscribeEmail()">Report zuschicken</button>
             </div>
-            <p class="audit-note">✓ Kostenloser Basis-Check · Keine Kreditkarte · DSGVO-konform · <a
-                    href="#">Datenschutz</a></p>
+            <p class="audit-note">✓ Echte Daten via Google PageSpeed API · Kein Fake · <a href="#"
+                    onclick="toggleApiKeyBox(event)">API-Key eingeben (optional, für mehr Anfragen)</a></p>
+            <div id="apiKeyBox"
+                style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+                <div style="display:flex;gap:8px;align-items:center">
+                    <input type="text" id="apiKeyInput" placeholder="AIza... (Google PageSpeed API Key)"
+                        style="flex:1;padding:9px 14px;border:1.5px solid var(--border);border-radius:8px;font-family:inherit;font-size:13px;outline:none;background:var(--bg)">
+                    <button class="btn btn-outline" style="font-size:12px;padding:9px 14px;white-space:nowrap"
+                        onclick="window.open('https://developers.google.com/speed/docs/insights/v5/get-started','_blank')">Key
+                        holen →</button>
+                </div>
+                <p style="font-size:11.5px;color:var(--text-light);margin-top:8px">Ohne Key: ~25 Anfragen/Tag per IP.
+                    Mit kostenlosem Google Key: 10.000/Tag. Dein Key verlässt nie den Browser.</p>
+            </div>
         </div>
 
         <div class="trust-strip">
@@ -1619,58 +1631,184 @@
     </div>
 
     <script>
-        // ===== SIMULATED AUDIT DATA =====
-        function generateAuditData(url) {
-            const domain = url.replace(/https?:\/\//, '').split('/')[0] || url;
-            const score = Math.floor(Math.random() * 35) + 42; // 42–77 (intentionally imperfect)
-            const deadLinks = Math.floor(Math.random() * 12) + 2;
-            const warnLinks = Math.floor(Math.random() * 5) + 1;
+        // ===== API KEY TOGGLE =====
+        function toggleApiKeyBox(e) {
+            e.preventDefault();
+            const box = document.getElementById('apiKeyBox');
+            box.style.display = box.style.display === 'none' ? 'block' : 'none';
+        }
 
+        // ===== HELPERS =====
+        function getApiKey() {
+            return (document.getElementById('apiKeyInput')?.value || '').trim();
+        }
+
+        function score2status(score) {
+            if (score === null || score === undefined) return 'warn';
+            if (score >= 0.9) return 'ok';
+            if (score >= 0.5) return 'warn';
+            return 'fail';
+        }
+
+        function score2badge(status) {
+            return { ok: 'OK', warn: 'Warnung', fail: 'Kritisch' }[status];
+        }
+
+        function perfScore2detail(score, lcp) {
+            const pct = Math.round((score ?? 0) * 100);
+            const lcpStr = lcp ? ` · LCP: ${lcp}` : '';
+            if (pct >= 90) return `Sehr schnell (Score ${pct}/100${lcpStr})`;
+            if (pct >= 50) return `Verbesserungsbedarf (Score ${pct}/100${lcpStr})`;
+            return `Kritisch langsam (Score ${pct}/100${lcpStr})`;
+        }
+
+        // ===== REAL PAGESPEED API CALL =====
+        async function fetchPageSpeed(url) {
+            const key = getApiKey();
+            const keyParam = key ? `&key=${encodeURIComponent(key)}` : '';
+            // Run mobile & desktop in parallel
+            const [mobileRes, desktopRes] = await Promise.all([
+                fetch(`https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&strategy=mobile&category=performance&category=seo&category=accessibility&category=best-practices${keyParam}`),
+                fetch(`https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&strategy=desktop&category=performance&category=seo${keyParam}`)
+            ]);
+
+            if (!mobileRes.ok) {
+                const err = await mobileRes.json().catch(() => ({}));
+                const msg = err?.error?.message || `HTTP ${mobileRes.status}`;
+                throw new Error(msg);
+            }
+
+            const mobile = await mobileRes.json();
+            const desktop = await desktopRes.json().catch(() => null);
+            return { mobile, desktop };
+        }
+
+        // ===== PARSE PAGESPEED INTO CHECKS =====
+        function parsePageSpeedData(mobile, desktop, url) {
+            const lhr = mobile.lighthouseResult;
+            const audits = lhr?.audits || {};
+            const cats = lhr?.categories || {};
+
+            const perfScore = cats.performance?.score ?? null;
+            const seoScore = cats.seo?.score ?? null;
+            const a11yScore = cats.accessibility?.score ?? null;
+            const bpScore = cats['best-practices']?.score ?? null;
+
+            const lcp = audits['largest-contentful-paint']?.displayValue || null;
+            const tbt = audits['total-blocking-time']?.displayValue || null;
+            const cls = audits['cumulative-layout-shift']?.displayValue || null;
+
+            const metaDescScore = audits['meta-description']?.score ?? null;
+            const titleScore = audits['document-title']?.score ?? null;
+            const viewportScore = audits['viewport']?.score ?? null;
+            const httpsScore = audits['is-on-https']?.score ?? null;
+            const robotsScore = audits['is-crawlable']?.score ?? null;
+            const sitemapScore = audits['crawlable-links']?.score ?? null;
+
+            // Desktop perf for comparison
+            const desktopPerf = desktop?.lighthouseResult?.categories?.performance?.score ?? null;
+
+            // Compose checks array — all real data
             const checks = [
                 {
-                    name: 'Tote Links', icon: '🔗',
-                    status: deadLinks > 5 ? 'fail' : deadLinks > 2 ? 'warn' : 'ok',
-                    detail: deadLinks > 5 ? `${deadLinks} tote Links gefunden` : deadLinks > 2 ? `${deadLinks} Weiterleitungen` : 'Alle Links erreichbar',
-                    badge: deadLinks > 5 ? 'Kritisch' : deadLinks > 2 ? 'Warnung' : 'OK'
+                    name: 'Ladegeschwindigkeit (Mobile)',
+                    icon: '⚡',
+                    status: score2status(perfScore),
+                    detail: perfScore2detail(perfScore, lcp),
+                    badge: score2badge(score2status(perfScore)),
+                    extra: tbt ? `TBT: ${tbt}` : null
                 },
                 {
-                    name: 'SSL-Zertifikat', icon: '🔒',
-                    status: Math.random() > 0.15 ? 'ok' : 'fail',
-                    detail: Math.random() > 0.15 ? 'Gültig & aktuell' : 'Zertifikat abgelaufen!',
-                    badge: Math.random() > 0.15 ? 'OK' : 'Kritisch'
+                    name: 'Mobile-Optimierung',
+                    icon: '📱',
+                    status: score2status(viewportScore),
+                    detail: viewportScore >= 1
+                        ? 'Viewport korrekt gesetzt, responsive erkannt'
+                        : viewportScore === 0
+                            ? 'Kein Viewport-Meta-Tag — Seite nicht mobiloptimiert!'
+                            : 'Viewport-Check nicht möglich',
+                    badge: score2badge(score2status(viewportScore))
                 },
                 {
-                    name: 'Meta-Tags', icon: '🏷️',
-                    status: Math.random() > 0.4 ? 'warn' : 'ok',
-                    detail: Math.random() > 0.4 ? 'Description fehlt auf 3 Seiten' : 'Vollständig ausgefüllt',
-                    badge: Math.random() > 0.4 ? 'Warnung' : 'OK'
+                    name: 'SEO-Grundlagen',
+                    icon: '🔍',
+                    status: score2status(seoScore),
+                    detail: (() => {
+                        const pct = Math.round((seoScore ?? 0) * 100);
+                        if (pct >= 90) return `Sehr gut (SEO-Score ${pct}/100)`;
+                        if (pct >= 50) return `Ausbaufähig (SEO-Score ${pct}/100)`;
+                        return `Kritisch (SEO-Score ${pct}/100)`;
+                    })(),
+                    badge: score2badge(score2status(seoScore))
                 },
                 {
-                    name: 'Ladegeschwindigkeit', icon: '⚡',
-                    status: Math.random() > 0.5 ? 'warn' : 'fail',
-                    detail: Math.random() > 0.5 ? 'Ø 2.8 Sek. (Ziel: <2 Sek.)' : 'Ø 5.1 Sek. — kritisch langsam',
-                    badge: Math.random() > 0.5 ? 'Warnung' : 'Kritisch'
+                    name: 'Meta-Tags (Title & Description)',
+                    icon: '🏷️',
+                    status: (() => {
+                        if (metaDescScore === 1 && titleScore === 1) return 'ok';
+                        if (metaDescScore === 0 || titleScore === 0) return 'fail';
+                        return 'warn';
+                    })(),
+                    detail: (() => {
+                        const issues = [];
+                        if (titleScore === 0) issues.push('Kein Titel-Tag');
+                        if (metaDescScore === 0) issues.push('Keine Meta-Description');
+                        return issues.length ? issues.join(' · ') : 'Title & Description vorhanden';
+                    })(),
+                    badge: score2badge((() => {
+                        if (metaDescScore === 1 && titleScore === 1) return 'ok';
+                        if (metaDescScore === 0 || titleScore === 0) return 'fail';
+                        return 'warn';
+                    })())
                 },
                 {
-                    name: 'Mobile-Optimierung', icon: '📱',
-                    status: Math.random() > 0.35 ? 'ok' : 'warn',
-                    detail: Math.random() > 0.35 ? 'Responsive Design erkannt' : 'Viewport nicht korrekt gesetzt',
-                    badge: Math.random() > 0.35 ? 'OK' : 'Warnung'
+                    name: 'HTTPS / SSL',
+                    icon: '🔒',
+                    status: score2status(httpsScore),
+                    detail: httpsScore === 1
+                        ? 'HTTPS aktiv, Verbindung verschlüsselt'
+                        : httpsScore === 0
+                            ? 'Kein HTTPS! Seite überträgt Daten unverschlüsselt'
+                            : 'SSL-Status nicht eindeutig prüfbar',
+                    badge: score2badge(score2status(httpsScore))
                 },
                 {
-                    name: 'Robots & Sitemap', icon: '🗺️',
-                    status: Math.random() > 0.5 ? 'ok' : 'warn',
-                    detail: Math.random() > 0.5 ? 'Sitemap.xml gefunden' : 'Keine sitemap.xml',
-                    badge: Math.random() > 0.5 ? 'OK' : 'Warnung'
+                    name: 'Crawler-Zugang (Robots)',
+                    icon: '🗺️',
+                    status: score2status(robotsScore),
+                    detail: robotsScore === 1
+                        ? 'Seite für Suchmaschinen zugänglich'
+                        : robotsScore === 0
+                            ? 'robots.txt blockiert Suchmaschinen!'
+                            : 'Crawler-Status nicht prüfbar',
+                    badge: score2badge(score2status(robotsScore))
                 },
             ];
 
-            // Recalculate score based on checks
-            const failCount = checks.filter(c => c.status === 'fail').length;
-            const warnCount = checks.filter(c => c.status === 'warn').length;
-            const adjustedScore = Math.max(28, Math.min(88, 100 - failCount * 18 - warnCount * 7));
+            // Overall score: weighted average of real API scores
+            const weights = [
+                [perfScore, 0.35],
+                [seoScore, 0.30],
+                [a11yScore, 0.20],
+                [bpScore, 0.15],
+            ];
+            const totalWeight = weights.filter(([s]) => s !== null).reduce((a, [, w]) => a + w, 0);
+            const weightedSum = weights.filter(([s]) => s !== null).reduce((a, [s, w]) => a + s * w, 0);
+            const overallScore = totalWeight > 0 ? Math.round((weightedSum / totalWeight) * 100) : 0;
 
-            return { url: domain, score: adjustedScore, deadLinks, checks };
+            const domain = url.replace(/https?:\/\//, '').split('/')[0];
+
+            return {
+                url: domain,
+                score: overallScore,
+                perfScore: Math.round((perfScore ?? 0) * 100),
+                seoScore: Math.round((seoScore ?? 0) * 100),
+                a11yScore: Math.round((a11yScore ?? 0) * 100),
+                desktopPerf: desktopPerf !== null ? Math.round(desktopPerf * 100) : null,
+                lcp, tbt, cls,
+                checks,
+                raw: { mobile }
+            };
         }
 
         // ===== AUDIT FLOW =====
@@ -1686,50 +1824,71 @@
             runAudit(url);
         }
 
-        function runAudit(url) {
-            if (!url) {
-                showToast('Bitte eine URL eingeben!', '⚠️');
-                return;
-            }
+        async function runAudit(url) {
+            if (!url) { showToast('Bitte eine URL eingeben!', '⚠️'); return; }
             if (!url.startsWith('http')) url = 'https://' + url;
 
             document.getElementById('loadingUrl').textContent = url;
             document.getElementById('loadingOverlay').classList.add('active');
 
-            // Reset steps
+            // Animate loading steps
             for (let i = 1; i <= 5; i++) {
                 const el = document.getElementById('ls' + i);
                 el.classList.remove('done', 'active');
             }
-
-            let step = 0;
-            const timings = [600, 1100, 1700, 2300, 2900];
-
-            timings.forEach((t, i) => {
+            const stepTimings = [200, 600, 1200, 1800, 2400];
+            stepTimings.forEach((t, i) => {
                 setTimeout(() => {
-                    if (i > 0) document.getElementById('ls' + i).classList.replace('active', 'done');
-                    document.getElementById('ls' + (i + 1)).classList.add('active');
+                    if (i > 0) {
+                        const prev = document.getElementById('ls' + i);
+                        if (prev) prev.classList.replace('active', 'done');
+                    }
+                    const cur = document.getElementById('ls' + (i + 1));
+                    if (cur) cur.classList.add('active');
                 }, t);
             });
 
-            setTimeout(() => {
+            try {
+                const { mobile, desktop } = await fetchPageSpeed(url);
                 document.getElementById('ls5').classList.replace('active', 'done');
-                currentAuditData = generateAuditData(url);
+                currentAuditData = parsePageSpeedData(mobile, desktop, url);
                 document.getElementById('loadingOverlay').classList.remove('active');
                 openModal(currentAuditData);
-            }, 3600);
+            } catch (err) {
+                document.getElementById('loadingOverlay').classList.remove('active');
+                const friendly = err.message.includes('404') || err.message.includes('NOT_FOUND')
+                    ? 'URL nicht erreichbar. Bitte prüfe die Adresse.'
+                    : err.message.includes('INVALID_ARGUMENT')
+                        ? 'Ungültige URL. Bitte vollständige Adresse eingeben (z.B. https://...).'
+                        : err.message.includes('429') || err.message.includes('RATE_LIMIT')
+                            ? 'API-Limit erreicht. Bitte Google API-Key eingeben (kostenlos).'
+                            : `Fehler: ${err.message}`;
+                showToast(friendly, '⚠️');
+            }
         }
 
         // ===== MODAL =====
         function openModal(data, demo = false) {
             if (demo || !data) {
-                data = generateAuditData('beispiel-handwerk.de');
+                // Demo with placeholder values — clearly labelled
+                data = {
+                    url: 'beispiel-handwerk.de',
+                    score: 62, perfScore: 55, seoScore: 78, a11yScore: 70, desktopPerf: 82,
+                    lcp: '3.2 s', tbt: '240 ms', cls: '0.08',
+                    checks: [
+                        { name: 'Ladegeschwindigkeit (Mobile)', icon: '⚡', status: 'warn', detail: 'Verbesserungsbedarf (Score 55/100 · LCP: 3.2 s)', badge: 'Warnung' },
+                        { name: 'Mobile-Optimierung', icon: '📱', status: 'ok', detail: 'Viewport korrekt gesetzt, responsive erkannt', badge: 'OK' },
+                        { name: 'SEO-Grundlagen', icon: '🔍', status: 'ok', detail: 'Sehr gut (SEO-Score 78/100)', badge: 'OK' },
+                        { name: 'Meta-Tags', icon: '🏷️', status: 'warn', detail: 'Keine Meta-Description', badge: 'Warnung' },
+                        { name: 'HTTPS / SSL', icon: '🔒', status: 'ok', detail: 'HTTPS aktiv, Verbindung verschlüsselt', badge: 'OK' },
+                        { name: 'Crawler-Zugang', icon: '🗺️', status: 'ok', detail: 'Seite für Suchmaschinen zugänglich', badge: 'OK' },
+                    ],
+                    isDemo: true
+                };
             }
             currentAuditData = data;
             document.getElementById('modalBody').innerHTML = buildModalHTML(data);
             document.getElementById('resultsModal').classList.add('active');
-
-            // Animate ring after render
             setTimeout(() => animateRing(data.score), 100);
         }
 
@@ -1744,7 +1903,23 @@
             const scoreColor = data.score >= 70 ? 'var(--accent)' : data.score >= 45 ? 'var(--warn)' : 'var(--danger)';
             const scoreLabel = data.score >= 70 ? 'Gut' : data.score >= 45 ? 'Verbesserungsbedarf' : 'Kritisch';
             const circumference = 2 * Math.PI * 50;
-            const dash = circumference - (data.score / 100) * circumference;
+
+            // Sub-score pills
+            const subScores = data.isDemo ? '' : `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+      <span style="background:var(--bg);border:1px solid var(--border);border-radius:100px;font-size:12px;padding:3px 10px;color:var(--text-muted)">⚡ Performance: <strong style="color:var(--text)">${data.perfScore}</strong></span>
+      <span style="background:var(--bg);border:1px solid var(--border);border-radius:100px;font-size:12px;padding:3px 10px;color:var(--text-muted)">🔍 SEO: <strong style="color:var(--text)">${data.seoScore}</strong></span>
+      <span style="background:var(--bg);border:1px solid var(--border);border-radius:100px;font-size:12px;padding:3px 10px;color:var(--text-muted)">♿ Accessibility: <strong style="color:var(--text)">${data.a11yScore}</strong></span>
+      ${data.desktopPerf !== null ? `<span style="background:var(--bg);border:1px solid var(--border);border-radius:100px;font-size:12px;padding:3px 10px;color:var(--text-muted)">🖥️ Desktop: <strong style="color:var(--text)">${data.desktopPerf}</strong></span>` : ''}
+    </div>`;
+
+            const demoWarning = data.isDemo ? `
+    <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:10px 14px;margin-bottom:18px;font-size:12.5px;color:#92400e">
+      ⚠️ <strong>Demo-Ansicht</strong> — Gib eine echte URL oben ein um echte Daten zu sehen.
+    </div>` : `
+    <div style="background:var(--accent-light);border:1px solid #bbf7d0;border-radius:10px;padding:10px 14px;margin-bottom:18px;font-size:12.5px;color:var(--accent)">
+      ✓ <strong>Echte Daten</strong> — Ergebnisse direkt von Google PageSpeed Insights API
+    </div>`;
 
             const checksHTML = data.checks.map(c => `
     <div class="check-item">
@@ -1757,7 +1932,10 @@
     </div>
   `).join('');
 
+            const failingChecks = data.checks.filter(c => c.status !== 'ok');
+
             return `
+    ${demoWarning}
     <div class="score-section">
       <div class="score-ring-wrap">
         <svg width="120" height="120" viewBox="0 0 120 120">
@@ -1776,6 +1954,7 @@
         <h3>Bewertung: <span style="color:${scoreColor}">${scoreLabel}</span></h3>
         <p>Wir haben <strong>${data.checks.filter(c => c.status === 'fail').length} kritische Probleme</strong> und <strong>${data.checks.filter(c => c.status === 'warn').length} Warnungen</strong> gefunden, die deine lokale Sichtbarkeit beeinträchtigen.</p>
         <span class="score-url">🌐 ${data.url}</span>
+        ${subScores}
       </div>
     </div>
 
@@ -1783,16 +1962,17 @@
       ${checksHTML}
     </div>
 
+    ${failingChecks.length > 0 ? `
     <div class="paywall-section">
       <div class="paywall-blur">
-        <h4 style="margin-bottom:12px;font-size:15px">Detaillierte Handlungsempfehlungen (${data.checks.filter(c => c.status !== 'ok').length} Maßnahmen)</h4>
+        <h4 style="margin-bottom:12px;font-size:15px">Detaillierte Handlungsempfehlungen (${failingChecks.length} Maßnahmen)</h4>
         <div style="display:flex;flex-direction:column;gap:8px">
-          ${data.checks.filter(c => c.status !== 'ok').map((c, i) => `
+          ${failingChecks.map((c, i) => `
             <div style="background:var(--bg);border-radius:8px;padding:12px 14px;display:flex;gap:10px;align-items:flex-start">
               <span style="font-weight:700;color:var(--accent);font-size:13px">#${i + 1}</span>
               <div>
                 <div style="font-size:13px;font-weight:600;margin-bottom:2px">${c.name} beheben</div>
-                <div style="font-size:12px;color:var(--text-muted)">Schritt-für-Schritt Anleitung, geschätzter Aufwand: ${Math.floor(Math.random() * 3) + 1}h, Wirkung auf Score: +${Math.floor(Math.random() * 15) + 5} Punkte</div>
+                <div style="font-size:12px;color:var(--text-muted)">Problem: ${c.detail} — Konkrete Fixes, Code-Snippets und geschätzte Auswirkung auf Score enthalten</div>
               </div>
             </div>
           `).join('')}
@@ -1801,21 +1981,26 @@
       <div class="paywall-overlay">
         <div class="paywall-lock">🔒</div>
         <div class="paywall-title">Vollständiger Report freischalten</div>
-        <div class="paywall-sub">Erhalte alle Handlungsempfehlungen, Prioritäten und die Schritt-für-Schritt-Anleitung als PDF</div>
+        <div class="paywall-sub">Konkrete Code-Snippets, Fixes und Schritt-für-Schritt-Anleitung für jedes Problem als PDF</div>
         <button class="btn btn-primary btn-large" onclick="buyReport()">
           Report für 19 € freischalten
         </button>
         <p style="font-size:12px;color:var(--text-light);margin-top:10px">Sichere Zahlung · Sofort-Download · DSGVO-konform</p>
       </div>
-    </div>
+    </div>` : `
+    <div style="background:var(--accent-light);border:1.5px solid #bbf7d0;border-radius:12px;padding:20px;text-align:center;margin-bottom:8px">
+      <div style="font-size:24px;margin-bottom:8px">🎉</div>
+      <div style="font-weight:600;margin-bottom:4px">Starkes Ergebnis!</div>
+      <div style="font-size:13px;color:var(--text-muted)">Deine Website hat keine kritischen Probleme. Für einen vollständigen Deep-Dive kannst du trotzdem den Pro-Report anfordern.</div>
+    </div>`}
 
-    <div style="background:var(--accent-light);border:1px solid #bbf7d0;border-radius:12px;padding:16px 20px;margin-top:20px;display:flex;align-items:center;gap:14px">
+    <div style="background:var(--accent-light);border:1px solid #bbf7d0;border-radius:12px;padding:16px 20px;margin-top:16px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
       <span style="font-size:24px">📧</span>
-      <div style="flex:1">
-        <div style="font-size:13px;font-weight:600;margin-bottom:2px">Gratis: Score-Zusammenfassung per E-Mail</div>
-        <div style="font-size:12px;color:var(--text-muted)">Wir schicken dir diese Zusammenfassung als Erinnerung zu</div>
+      <div style="flex:1;min-width:160px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:2px">Score-Zusammenfassung per E-Mail</div>
+        <div style="font-size:12px;color:var(--text-muted)">Kostenlos — als Erinnerung und für dein Archiv</div>
       </div>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
         <input type="email" id="modalEmail" placeholder="deine@email.de" style="padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:inherit;font-size:13px;outline:none;width:190px">
         <button class="btn btn-primary" style="padding:8px 16px;font-size:13px" onclick="sendModalEmail()">Senden</button>
       </div>
@@ -1828,10 +2013,7 @@
             const circle = document.getElementById('scoreCircle');
             const numEl = document.getElementById('scoreNum');
             if (!circle || !numEl) return;
-
-            const targetDash = circumference - (target / 100) * circumference;
-            circle.style.strokeDashoffset = targetDash;
-
+            circle.style.strokeDashoffset = circumference - (target / 100) * circumference;
             let current = 0;
             const step = target / 40;
             const interval = setInterval(() => {
@@ -1863,7 +2045,7 @@
             document.getElementById('toastMsg').textContent = msg;
             toast.querySelector('span').textContent = icon;
             toast.classList.add('show');
-            setTimeout(() => toast.classList.remove('show'), 3500);
+            setTimeout(() => toast.classList.remove('show'), 4000);
         }
 
         // ===== SCROLL REVEAL =====
@@ -1872,10 +2054,9 @@
                 if (e.isIntersecting) { e.target.classList.add('visible'); observer.unobserve(e.target); }
             });
         }, { threshold: 0.1 });
-
         document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
 
-        // ===== KEYBOARD SHORTCUT =====
+        // ===== KEYBOARD =====
         document.getElementById('urlInput').addEventListener('keydown', e => {
             if (e.key === 'Enter') startAudit();
         });
